@@ -384,12 +384,16 @@ class VerifyForgotPasswordOTPView(APIView):
             {
                 "success": True,
                 "message": "OTP verified",
-                "accessToken": str(refresh.access_token),
-                "refreshToken": str(refresh),
-                "user": {
-                    "email": user.email,
-                    "full_name": user.full_name,
-                    "role": role,
+                "data": {
+                    "tokens": {
+                        "access": str(refresh.access_token),
+                        "refresh": str(refresh),
+                    },
+                    "user": {
+                        "email": user.email,
+                        "full_name": user.full_name,
+                        "role": role,
+                    },
                 },
             },
             status=status.HTTP_200_OK,
