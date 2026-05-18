@@ -288,88 +288,189 @@ class VerifyForgotPasswordOTPView(APIView):
         serializer = VerifyForgotPasswordOTPSerializer(data=request.data)
 
         if not serializer.is_valid():
-            return error_response("Validation error", serializer.errors)
+            return Response(
+                {
+                    "success": False,
+                    "message": "Validation error",
+                    "data": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        email = serializer.validated_data["email"].lower()
+        email = serializer.validated_data["email"]
         otp_code = serializer.validated_data["otp_code"]
 
         user = User.objects.filter(email=email).first()
 
         if not user:
-            return error_response("User not found", status_code=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {
+                    "success": False,
+                    "message": "User not found",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         otp = OTP.objects.filter(
             user=user,
+            email=email,
             purpose=OTP.Purpose.PASSWORD_RESET,
             is_used=False,
         ).order_by("-created_at").first()
 
         if not otp:
-            return error_response("OTP not found. Please request a new OTP.")
+            return Response(
+                {
+                    "success": False,
+                    "message": "OTP not found",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if otp.is_verified:
+            return Response(
+                {
+                    "success": False,
+                    "message": "OTP already verified",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if otp.is_expired():
-            return error_response("OTP expired. Please request a new OTP.")
+            return Response(
+                {
+                    "success": False,
+                    "message": "OTP expired",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if otp.attempts >= otp.max_attempts:
-            return error_response("Maximum OTP attempts exceeded. Please request a new OTP.")
+            return Response(
+                {
+                    "success": False,
+                    "message": "OTP attempt limit exceeded",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        otp.attempts += 1
 
         if otp.otp_code != otp_code:
-            otp.attempts += 1
             otp.save(update_fields=["attempts"])
-            return error_response("Invalid OTP")
+            return Response(
+                {
+                    "success": False,
+                    "message": "Invalid OTP",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         otp.is_verified = True
-        otp.save(update_fields=["is_verified"])
+        otp.save(update_fields=["attempts", "is_verified"])
 
-        otp.generate_reset_token()
+        refresh = RefreshToken.for_user(user)
 
-        return success_response(
-            message="OTP verified successfully",
-            data={
-                "email": user.email,
-                "reset_token": otp.reset_token,
+        if user.is_superuser or user.role == User.Role.ADMIN:
+            role = "admin"
+        elif user.role == User.Role.FAMILY_OWNER:
+            role = "family_owner"
+        elif user.role == User.Role.FAMILY_MEMBER:
+            role = "family_member"
+        else:
+            role = "user"
+
+        return Response(
+            {
+                "success": True,
+                "message": "OTP verified",
+                "accessToken": str(refresh.access_token),
+                "refreshToken": str(refresh),
+                "user": {
+                    "email": user.email,
+                    "full_name": user.full_name,
+                    "role": role,
+                },
             },
+            status=status.HTTP_200_OK,
         )
 
 
 class ResetPasswordView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         serializer = ResetPasswordSerializer(data=request.data)
 
         if not serializer.is_valid():
-            return error_response("Validation error", serializer.errors)
+            return error_response(
+                message="Validation error",
+                data=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
 
-        reset_token = serializer.validated_data["reset_token"]
-        new_password = serializer.validated_data["new_password"]
+        user = request.user
 
         otp = OTP.objects.filter(
+            user=user,
             purpose=OTP.Purpose.PASSWORD_RESET,
-            reset_token=reset_token,
             is_verified=True,
             is_used=False,
-        ).select_related("user").first()
+        ).order_by("-created_at").first()
 
         if not otp:
-            return error_response("Invalid reset token")
+            return error_response(
+                message="OTP verification required before resetting password",
+                data={},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
 
-        if otp.is_reset_token_expired():
-            return error_response("Reset token expired")
+        if otp.is_expired():
+            return error_response(
+                message="Reset session expired",
+                data={},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
 
-        user = otp.user
-        user.set_password(new_password)
+        user.set_password(serializer.validated_data["new_password"])
         user.save(update_fields=["password"])
 
         otp.is_used = True
         otp.save(update_fields=["is_used"])
 
-        return success_response(
-            message="Password reset successfully",
-            data={
-                "user": user_data(user),
-                "tokens": get_tokens_for_user(user),
+        refresh = RefreshToken.for_user(user)
+
+        if user.is_superuser or user.role == User.Role.ADMIN:
+            account_type = "admin"
+        elif user.role == User.Role.FAMILY_OWNER:
+            account_type = "family_owner"
+        elif user.role == User.Role.FAMILY_MEMBER:
+            account_type = "family_member"
+        else:
+            account_type = "user"
+
+        return error_response(
+            message="",
+            data={},
+        ) if False else Response(
+            {
+                "success": True,
+                "message": "Password reset successfully",
+                "data": {
+                    "user": {
+                        "id": user.id,
+                        "email": user.email,
+                        "full_name": user.full_name,
+                        "profile_image": None,
+                        "account_type": account_type,
+                    },
+                    "tokens": {
+                        "access": str(refresh.access_token),
+                        "refresh": str(refresh),
+                    },
+                },
             },
+            status=status.HTTP_200_OK,
         )
 
 
