@@ -1,0 +1,35 @@
+from django.urls import path
+
+from .views import (
+    RegisterView,
+    VerifyEmailOTPView,
+    ResendEmailOTPView,
+    LoginView,
+    ForgotPasswordView,
+    ResendForgotPasswordOTPView,
+    VerifyForgotPasswordOTPView,
+    ResetPasswordView,
+    ChangePasswordView,
+    LogoutView,
+    InviteFamilyMemberView,
+    AcceptInviteView,
+)
+
+urlpatterns = [
+    path("register/", RegisterView.as_view()),
+    path("verify-otp/", VerifyEmailOTPView.as_view()),
+    path("resend-otp/", ResendEmailOTPView.as_view()),
+
+    path("login/", LoginView.as_view()),
+    path("logout/", LogoutView.as_view()),
+
+    path("forgot-password/", ForgotPasswordView.as_view()),
+    path("resend-forgot-password-otp/", ResendForgotPasswordOTPView.as_view()),
+    path("verify-forgot-password-otp/", VerifyForgotPasswordOTPView.as_view()),
+    path("reset-password/", ResetPasswordView.as_view()),
+
+    path("change-password/", ChangePasswordView.as_view()),
+
+    path("family/invite-member/", InviteFamilyMemberView.as_view()),
+    path("family/accept-invite/", AcceptInviteView.as_view()),
+]
