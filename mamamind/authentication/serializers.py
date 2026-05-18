@@ -121,12 +121,23 @@ class ForgotPasswordSerializer(serializers.Serializer):
 
 
 class VerifyForgotPasswordOTPSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    email = serializers.EmailField(required=False)
+    email_address = serializers.EmailField(required=False)
     otp_code = serializers.CharField(max_length=6)
+
+    def validate(self, attrs):
+        email = attrs.get("email") or attrs.get("email_address")
+
+        if not email:
+            raise serializers.ValidationError({
+                "email": ["This field is required."]
+            })
+
+        attrs["email"] = email.lower()
+        return attrs
 
 
 class ResetPasswordSerializer(serializers.Serializer):
-    reset_token = serializers.CharField()
     new_password = serializers.CharField(write_only=True, min_length=8)
     confirm_password = serializers.CharField(write_only=True, min_length=8)
 
