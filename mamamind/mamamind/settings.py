@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     'authentication',
     'faqs',
     'contact'
+    'subscriptions'
 ]
 
 MIDDLEWARE = [
