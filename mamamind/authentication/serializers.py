@@ -228,7 +228,7 @@ class InviteFamilyMemberSerializer(serializers.Serializer):
 
         member_membership.generate_invite_token()
 
-        invite_link = f"http://127.0.0.1:3000/accept-invite/{member_membership.invite_token}"
+        invite_link = f"https://l9vtwvjb-8000.inc1.devtunnels.ms/accept-invite/{member_membership.invite_token}"
 
         send_mail(
             subject="Mamamind Family Invitation",

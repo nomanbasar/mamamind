@@ -169,10 +169,10 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
 STRIPE_SUCCESS_URL = os.getenv(
     "STRIPE_SUCCESS_URL",
-    "http://127.0.0.1:3000/payment/success"
+    "https://l9vtwvjb-8000.inc1.devtunnels.ms/payment/success"
 )
 
 STRIPE_CANCEL_URL = os.getenv(
     "STRIPE_CANCEL_URL",
-    "http://127.0.0.1:3000/payment/cancel"
+    "https://l9vtwvjb-8000.inc1.devtunnels.ms/payment/cancel"
 )

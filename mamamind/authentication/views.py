@@ -555,7 +555,7 @@ class InviteFamilyMemberView(APIView):
                 "relation": membership.relation,
                 "status": membership.status,
                 "invite_token": membership.invite_token,
-                "invite_link": f"http://127.0.0.1:3000/accept-invite/{membership.invite_token}",
+                "invite_link": f"https://l9vtwvjb-8000.inc1.devtunnels.ms/accept-invite/{membership.invite_token}",
             },
             status_code=status.HTTP_201_CREATED,
         )

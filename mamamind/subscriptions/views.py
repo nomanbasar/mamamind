@@ -80,6 +80,103 @@ def unix_to_datetime(value):
 
     return datetime.fromtimestamp(value, tz=dt_timezone.utc)
 
+def stripe_value(obj, key, default=None):
+    """
+    Stripe object and normal dict both support korar jonno safe getter.
+    StripeObject e .get() kaj nao korte pare, tai obj[key] try kora hocche.
+    """
+    try:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+
+        return obj[key]
+    except Exception:
+        return default
+
+
+def get_subscription_period_from_stripe_subscription(stripe_subscription):
+    # Old Stripe API support
+    current_period_start = stripe_value(stripe_subscription, "current_period_start")
+    current_period_end = stripe_value(stripe_subscription, "current_period_end")
+
+    if current_period_start and current_period_end:
+        return current_period_start, current_period_end
+
+    # New Stripe API support: items.data[0].current_period_start/end
+    items = stripe_value(stripe_subscription, "items", {})
+    item_data = stripe_value(items, "data", [])
+
+    if item_data and len(item_data) > 0:
+        first_item = item_data[0]
+
+        current_period_start = stripe_value(first_item, "current_period_start")
+        current_period_end = stripe_value(first_item, "current_period_end")
+
+        if current_period_start and current_period_end:
+            return current_period_start, current_period_end
+
+    return None, None
+
+
+def activate_user_subscription_from_stripe_session(session):
+    from django.contrib.auth import get_user_model
+
+    metadata = stripe_value(session, "metadata", {})
+
+    user_id = stripe_value(metadata, "user_id")
+    plan_id = stripe_value(metadata, "plan_id")
+
+    if not user_id or not plan_id:
+        raise ValueError("Stripe session metadata missing user_id or plan_id")
+
+    User = get_user_model()
+    user = User.objects.get(id=user_id)
+    plan = SubscriptionPlan.objects.get(id=plan_id)
+
+    stripe_customer_id = stripe_value(session, "customer")
+    stripe_subscription_id = stripe_value(session, "subscription")
+    stripe_checkout_session_id = stripe_value(session, "id")
+
+    current_period_start = None
+    current_period_end = None
+
+    if stripe_subscription_id and settings.STRIPE_SECRET_KEY:
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+        stripe_subscription = stripe.Subscription.retrieve(
+            stripe_subscription_id,
+            expand=["items.data"],
+        )
+
+        period_start, period_end = get_subscription_period_from_stripe_subscription(
+            stripe_subscription
+        )
+
+        current_period_start = unix_to_datetime(period_start)
+        current_period_end = unix_to_datetime(period_end)
+
+    UserSubscription.objects.filter(
+        user=user,
+        status=UserSubscription.Status.ACTIVE,
+    ).update(
+        status=UserSubscription.Status.CANCELLED,
+        cancelled_at=timezone.now(),
+    )
+
+    subscription, created = UserSubscription.objects.update_or_create(
+        stripe_checkout_session_id=stripe_checkout_session_id,
+        defaults={
+            "user": user,
+            "plan": plan,
+            "status": UserSubscription.Status.ACTIVE,
+            "stripe_customer_id": stripe_customer_id,
+            "stripe_subscription_id": stripe_subscription_id,
+            "current_period_start": current_period_start,
+            "current_period_end": current_period_end,
+            "cancel_at_period_end": False,
+        },
+    )
+
+    return subscription
 
 class AdminSubscriptionPlanListCreateView(CustomPermissionResponseMixin, ListCreateAPIView):
     permission_classes = [IsAdminUserRole]
@@ -352,13 +449,16 @@ class StripeWebhookView(APIView):
 
         try:
             if endpoint_secret:
+                stripe.api_key = settings.STRIPE_SECRET_KEY
+
                 event = stripe.Webhook.construct_event(
-                    payload,
-                    sig_header,
-                    endpoint_secret,
+                    payload=payload,
+                    sig_header=sig_header,
+                    secret=endpoint_secret,
                 )
             else:
                 event = request.data
+
         except Exception as error:
             return error_response(
                 message="Invalid Stripe webhook payload",
@@ -368,64 +468,13 @@ class StripeWebhookView(APIView):
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-        event_type = event.get("type")
+        event_type = stripe_value(event, "type")
+        event_data = stripe_value(event, "data", {})
+        event_object = stripe_value(event_data, "object", {})
 
         if event_type == "checkout.session.completed":
-            session = event["data"]["object"]
-
-            user_id = session.get("metadata", {}).get("user_id")
-            plan_id = session.get("metadata", {}).get("plan_id")
-
-            if not user_id or not plan_id:
-                return success_response(
-                    message="Webhook received but metadata missing",
-                    data={},
-                )
-
             try:
-                from django.contrib.auth import get_user_model
-
-                User = get_user_model()
-                user = User.objects.get(id=user_id)
-                plan = SubscriptionPlan.objects.get(id=plan_id)
-
-                stripe_customer_id = session.get("customer")
-                stripe_subscription_id = session.get("subscription")
-                stripe_checkout_session_id = session.get("id")
-
-                current_period_start = None
-                current_period_end = None
-
-                if stripe_subscription_id and settings.STRIPE_SECRET_KEY:
-                    stripe.api_key = settings.STRIPE_SECRET_KEY
-                    stripe_subscription = stripe.Subscription.retrieve(stripe_subscription_id)
-
-                    current_period_start = unix_to_datetime(
-                        stripe_subscription.get("current_period_start")
-                    )
-                    current_period_end = unix_to_datetime(
-                        stripe_subscription.get("current_period_end")
-                    )
-
-                UserSubscription.objects.filter(
-                    user=user,
-                    status=UserSubscription.Status.ACTIVE,
-                ).update(
-                    status=UserSubscription.Status.CANCELLED,
-                    cancelled_at=timezone.now(),
-                )
-
-                subscription = UserSubscription.objects.create(
-                    user=user,
-                    plan=plan,
-                    status=UserSubscription.Status.ACTIVE,
-                    stripe_customer_id=stripe_customer_id,
-                    stripe_subscription_id=stripe_subscription_id,
-                    stripe_checkout_session_id=stripe_checkout_session_id,
-                    current_period_start=current_period_start,
-                    current_period_end=current_period_end,
-                    cancel_at_period_end=False,
-                )
+                subscription = activate_user_subscription_from_stripe_session(event_object)
 
                 return success_response(
                     message="Subscription activated successfully",
@@ -444,16 +493,20 @@ class StripeWebhookView(APIView):
                 )
 
         if event_type == "customer.subscription.deleted":
-            stripe_subscription_id = event["data"]["object"].get("id")
+            try:
+                stripe_subscription_id = stripe_value(event_object, "id")
 
-            if stripe_subscription_id:
-                UserSubscription.objects.filter(
-                    stripe_subscription_id=stripe_subscription_id,
-                ).update(
-                    status=UserSubscription.Status.CANCELLED,
-                    cancelled_at=timezone.now(),
-                    cancel_at_period_end=False,
-                )
+                if stripe_subscription_id:
+                    UserSubscription.objects.filter(
+                        stripe_subscription_id=stripe_subscription_id,
+                    ).update(
+                        status=UserSubscription.Status.CANCELLED,
+                        cancelled_at=timezone.now(),
+                        cancel_at_period_end=False,
+                    )
+
+            except Exception:
+                pass
 
         return success_response(
             message="Stripe webhook received successfully",
@@ -461,6 +514,56 @@ class StripeWebhookView(APIView):
                 "event_type": event_type,
             },
         )
+
+
+class StripePaymentSuccessView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        session_id = request.query_params.get("session_id")
+
+        if not session_id:
+            return error_response(
+                message="Stripe session id is required",
+                data={},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            stripe.api_key = settings.STRIPE_SECRET_KEY
+
+            session = stripe.checkout.Session.retrieve(session_id)
+            subscription = activate_user_subscription_from_stripe_session(session)
+
+            return success_response(
+                message="Payment completed successfully. Subscription activated.",
+                data={
+                    "session_id": session_id,
+                    "subscription": UserSubscriptionSerializer(subscription).data,
+                    "next_step": "Call GET /api/subscriptions/current/ with user token to verify active subscription.",
+                },
+            )
+
+        except Exception as error:
+            return error_response(
+                message="Payment success received but subscription activation failed",
+                data={
+                    "session_id": session_id,
+                    "error": str(error),
+                },
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+class StripePaymentCancelView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return error_response(
+            message="Payment was cancelled.",
+            data={},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
 
 
 class CancelSubscriptionView(APIView):
