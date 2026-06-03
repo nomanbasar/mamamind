@@ -238,6 +238,7 @@ class InviteFamilyMemberSerializer(serializers.Serializer):
         return membership
 
 
+
 class AcceptInviteSerializer(serializers.Serializer):
     invite_token = serializers.CharField()
     email = serializers.EmailField()
@@ -246,7 +247,7 @@ class AcceptInviteSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         invite_token = attrs.get("invite_token")
-        email = attrs.get("email")
+        email = attrs.get("email").lower()
         password = attrs.get("password")
         confirm_password = attrs.get("confirm_password")
 
@@ -270,45 +271,11 @@ class AcceptInviteSerializer(serializers.Serializer):
                 "invite_token": ["Invite token expired"]
             })
 
-        email_exists = User.objects.filter(email=email).exclude(
-            id=membership.user.id
-        ).exists()
-
-        if email_exists:
+        if User.objects.filter(email=email).exclude(id=membership.user.id).exists():
             raise serializers.ValidationError({
                 "email": ["Email already exists"]
             })
 
+        attrs["email"] = email
         attrs["membership"] = membership
-
         return attrs
-
-    @transaction.atomic
-    def save(self):
-        membership = self.validated_data["membership"]
-        user = membership.user
-
-        user.email = self.validated_data["email"]
-        user.set_password(self.validated_data["password"])
-        user.is_email_verified = True
-        user.is_active = True
-        user.save(update_fields=[
-            "email",
-            "password",
-            "is_email_verified",
-            "is_active",
-        ])
-
-        membership.status = FamilyMembership.Status.ACTIVE
-        membership.accepted_at = timezone.now()
-        membership.invite_token = None
-        membership.invite_expires_at = None
-        membership.save(update_fields=[
-            "status",
-            "accepted_at",
-            "invite_token",
-            "invite_expires_at",
-        ])
-
-        return user, membership
-    

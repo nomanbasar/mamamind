@@ -124,6 +124,9 @@ def public_email(user):
     return user.email
 
 
+def get_accept_invite_api_url(request):
+    return request.build_absolute_uri("/api/auth/family/accept-invite/")
+
 def family_member_item(membership):
     user = membership.user
 
@@ -174,10 +177,10 @@ def get_family_payload(family, subscription=None):
             {
                 **family_member_item(membership),
                 "invite_token": membership.invite_token,
-                "invite_link": f"http://127.0.0.1:3000/accept-invite/{membership.invite_token}",
+                "accept_invite_api": "/api/auth/family/accept-invite/",
                 "whatsapp_message": (
                     f"You have been invited to join {family.name} on Mamamind. "
-                    f"Accept invite: http://127.0.0.1:3000/accept-invite/{membership.invite_token}"
+                    f"Your invite token is: {membership.invite_token}"
                 ),
             }
             for membership in pending_memberships
@@ -711,10 +714,10 @@ class InviteFamilyMemberView(APIView):
                     "status_display": membership.get_status_display(),
                     "invite_token": membership.invite_token,
                     "invite_expires_at": membership.invite_expires_at,
-                    "invite_link": f"http://127.0.0.1:3000/accept-invite/{membership.invite_token}",
+                    "accept_invite_api": get_accept_invite_api_url(request),
                     "whatsapp_message": (
                         f"You have been invited to join {owner_membership.family.name} on Mamamind. "
-                        f"Accept invite: http://127.0.0.1:3000/accept-invite/{membership.invite_token}"
+                        f"Your invite token is: {membership.invite_token}"
                     ),
                 },
                 "usage": updated_usage,
@@ -730,26 +733,28 @@ class AcceptInviteView(APIView):
         serializer = AcceptInviteSerializer(data=request.data)
 
         if not serializer.is_valid():
-            return error_response("Validation error", serializer.errors)
+            return error_response(
+                message="Validation error",
+                data=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
 
-        invite_token = serializer.validated_data["invite_token"]
+        membership = serializer.validated_data["membership"]
+        email = serializer.validated_data["email"]
         password = serializer.validated_data["password"]
 
-        membership = FamilyMembership.objects.filter(
-            invite_token=invite_token,
-            status=FamilyMembership.Status.PENDING,
-        ).select_related("user", "family").first()
-
-        if not membership:
-            return error_response("Invalid invite token")
-
-        if membership.is_invite_expired():
-            return error_response("Invite token expired")
-
         user = membership.user
+
+        user.email = email
         user.set_password(password)
         user.is_email_verified = True
-        user.save(update_fields=["password", "is_email_verified"])
+        user.is_active = True
+        user.save(update_fields=[
+            "email",
+            "password",
+            "is_email_verified",
+            "is_active",
+        ])
 
         membership.status = FamilyMembership.Status.ACTIVE
         membership.accepted_at = timezone.now()
@@ -768,8 +773,8 @@ class AcceptInviteView(APIView):
                 "user": user_data(user),
                 "tokens": get_tokens_for_user(user),
             },
-        )
-    
+            status_code=status.HTTP_200_OK,
+        )  
 
 
 class FamilyMemberListView(APIView):
@@ -998,10 +1003,10 @@ class ResendFamilyInviteView(APIView):
                     "status_display": membership.get_status_display(),
                     "invite_token": membership.invite_token,
                     "invite_expires_at": membership.invite_expires_at,
-                    "invite_link": f"http://127.0.0.1:3000/accept-invite/{membership.invite_token}",
+                    "accept_invite_api": get_accept_invite_api_url(request),
                     "whatsapp_message": (
                         f"You have been invited to join {owner_membership.family.name} on Mamamind. "
-                        f"Accept invite: http://127.0.0.1:3000/accept-invite/{membership.invite_token}"
+                        f"Your invite token is: {membership.invite_token}"
                     ),
                 }
             },
