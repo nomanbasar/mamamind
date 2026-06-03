@@ -3,7 +3,7 @@ from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
-
+import secrets
 from .models import User, Family, FamilyMembership, OTP
 
 
@@ -177,7 +177,6 @@ class ChangePasswordSerializer(serializers.Serializer):
 
 class InviteFamilyMemberSerializer(serializers.Serializer):
     full_name = serializers.CharField(max_length=255)
-    email = serializers.EmailField()
     whatsapp_number = serializers.CharField(max_length=30)
     relation = serializers.ChoiceField(choices=[
         FamilyMembership.Relation.PARTNER,
@@ -186,12 +185,6 @@ class InviteFamilyMemberSerializer(serializers.Serializer):
         FamilyMembership.Relation.CAREGIVER,
         FamilyMembership.Relation.OTHER,
     ])
-
-    def validate_email(self, value):
-        value = value.lower()
-        if User.objects.filter(email=value).exists():
-            raise serializers.ValidationError("Email already exists")
-        return value
 
     def validate_whatsapp_number(self, value):
         if User.objects.filter(whatsapp_number=value).exists():
@@ -202,56 +195,120 @@ class InviteFamilyMemberSerializer(serializers.Serializer):
     def create(self, validated_data):
         owner = self.context["request"].user
 
-        membership = owner.family_memberships.filter(
+        owner_membership = owner.family_memberships.filter(
             relation=FamilyMembership.Relation.OWNER,
             status=FamilyMembership.Status.ACTIVE,
         ).select_related("family").first()
 
-        if not membership:
+        if not owner_membership:
             raise serializers.ValidationError("Family owner profile not found")
 
+        clean_number = (
+            validated_data["whatsapp_number"]
+            .replace("+", "")
+            .replace(" ", "")
+            .replace("-", "")
+        )
+
+        random_part = secrets.token_urlsafe(8).replace("-", "").replace("_", "").lower()
+
+        temporary_email = f"{clean_number}.{random_part}@mamamind.local"
+
         member_user = User.objects.create_user(
-            email=validated_data["email"],
+            email=temporary_email,
             password=None,
             full_name=validated_data["full_name"],
             whatsapp_number=validated_data["whatsapp_number"],
             role=User.Role.FAMILY_MEMBER,
-            is_email_verified=True,
+            is_email_verified=False,
         )
 
-        member_membership = FamilyMembership.objects.create(
-            family=membership.family,
+        member_user.set_unusable_password()
+        member_user.save(update_fields=["password"])
+
+        membership = FamilyMembership.objects.create(
+            family=owner_membership.family,
             user=member_user,
             relation=validated_data["relation"],
             status=FamilyMembership.Status.PENDING,
         )
 
-        member_membership.generate_invite_token()
+        membership.generate_invite_token()
 
-        invite_link = f"https://l9vtwvjb-8000.inc1.devtunnels.ms/accept-invite/{member_membership.invite_token}"
-
-        send_mail(
-            subject="Mamamind Family Invitation",
-            message=(
-                f"You have been invited to join {membership.family.name} on Mamamind.\n\n"
-                f"Accept invite: {invite_link}"
-            ),
-            from_email=None,
-            recipient_list=[member_user.email],
-            fail_silently=False,
-        )
-
-        return member_membership
+        return membership
 
 
 class AcceptInviteSerializer(serializers.Serializer):
     invite_token = serializers.CharField()
+    email = serializers.EmailField()
     password = serializers.CharField(write_only=True, min_length=8)
     confirm_password = serializers.CharField(write_only=True, min_length=8)
 
     def validate(self, attrs):
-        if attrs["password"] != attrs["confirm_password"]:
+        invite_token = attrs.get("invite_token")
+        email = attrs.get("email")
+        password = attrs.get("password")
+        confirm_password = attrs.get("confirm_password")
+
+        if password != confirm_password:
             raise serializers.ValidationError({
                 "confirm_password": ["Passwords do not match"]
             })
+
+        membership = FamilyMembership.objects.filter(
+            invite_token=invite_token,
+            status=FamilyMembership.Status.PENDING,
+        ).select_related("user", "family").first()
+
+        if not membership:
+            raise serializers.ValidationError({
+                "invite_token": ["Invalid invite token"]
+            })
+
+        if membership.is_invite_expired():
+            raise serializers.ValidationError({
+                "invite_token": ["Invite token expired"]
+            })
+
+        email_exists = User.objects.filter(email=email).exclude(
+            id=membership.user.id
+        ).exists()
+
+        if email_exists:
+            raise serializers.ValidationError({
+                "email": ["Email already exists"]
+            })
+
+        attrs["membership"] = membership
+
         return attrs
+
+    @transaction.atomic
+    def save(self):
+        membership = self.validated_data["membership"]
+        user = membership.user
+
+        user.email = self.validated_data["email"]
+        user.set_password(self.validated_data["password"])
+        user.is_email_verified = True
+        user.is_active = True
+        user.save(update_fields=[
+            "email",
+            "password",
+            "is_email_verified",
+            "is_active",
+        ])
+
+        membership.status = FamilyMembership.Status.ACTIVE
+        membership.accepted_at = timezone.now()
+        membership.invite_token = None
+        membership.invite_expires_at = None
+        membership.save(update_fields=[
+            "status",
+            "accepted_at",
+            "invite_token",
+            "invite_expires_at",
+        ])
+
+        return user, membership
+    
