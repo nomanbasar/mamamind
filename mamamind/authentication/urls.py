@@ -13,6 +13,11 @@ from .views import (
     LogoutView,
     InviteFamilyMemberView,
     AcceptInviteView,
+    FamilyMemberListView,
+    FamilyMemberUpdateView,
+    RemoveFamilyMemberView,
+    ResendFamilyInviteView,
+    CancelFamilyInviteView,
 )
 
 urlpatterns = [
@@ -32,4 +37,11 @@ urlpatterns = [
 
     path("family/invite-member/", InviteFamilyMemberView.as_view()),
     path("family/accept-invite/", AcceptInviteView.as_view()),
+
+    path("family/members/", FamilyMemberListView.as_view()),
+    path("family/members/<int:membership_id>/", FamilyMemberUpdateView.as_view()),
+    path("family/members/<int:membership_id>/remove/", RemoveFamilyMemberView.as_view()),
+
+    path("family/invites/<int:membership_id>/resend/", ResendFamilyInviteView.as_view()),
+    path("family/invites/<int:membership_id>/cancel/", CancelFamilyInviteView.as_view()),
 ]
