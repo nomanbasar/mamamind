@@ -5,8 +5,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
+from .models import User, OTP, Family, FamilyMembership
+from subscriptions.models import UserSubscription
 
-from .models import User, OTP, FamilyMembership
 from .serializers import (
     RegisterSerializer,
     VerifyEmailOTPSerializer,
@@ -58,7 +59,7 @@ def user_data(user):
     data = {
         "id": user.id,
         "full_name": user.full_name,
-        "email": user.email,
+        "email": user.email if not user.email.endswith("@mamamind.local") else None,
         "whatsapp_number": user.whatsapp_number,
         "role": user.role,
         "is_email_verified": user.is_email_verified,
@@ -73,6 +74,116 @@ def user_data(user):
         }
 
     return data
+
+
+def get_owner_family_membership(user):
+    return user.family_memberships.filter(
+        relation=FamilyMembership.Relation.OWNER,
+        status=FamilyMembership.Status.ACTIVE,
+    ).select_related("family").first()
+
+
+def get_user_family_membership(user):
+    return user.family_memberships.filter(
+        status=FamilyMembership.Status.ACTIVE,
+    ).select_related("family").first()
+
+
+def get_active_user_subscription(user):
+    return UserSubscription.objects.filter(
+        user=user,
+        status=UserSubscription.Status.ACTIVE,
+    ).select_related("plan").order_by("-id").first()
+
+
+def get_family_usage(family, plan=None):
+    active_count = family.memberships.filter(
+        status=FamilyMembership.Status.ACTIVE,
+    ).count()
+
+    pending_count = family.memberships.filter(
+        status=FamilyMembership.Status.PENDING,
+    ).count()
+
+    used = active_count + pending_count
+    limit = plan.member_limit if plan else 1
+
+    return {
+        "used": used,
+        "limit": limit,
+        "active_count": active_count,
+        "pending_count": pending_count,
+        "remaining": max(limit - used, 0),
+        "is_limit_reached": used >= limit,
+    }
+
+
+def public_email(user):
+    if user.email and user.email.endswith("@mamamind.local"):
+        return None
+    return user.email
+
+
+def family_member_item(membership):
+    user = membership.user
+
+    return {
+        "membership_id": membership.id,
+        "user_id": user.id,
+        "full_name": user.full_name,
+        "email": public_email(user),
+        "whatsapp_number": user.whatsapp_number,
+        "role": user.role,
+        "relation": membership.relation,
+        "relation_display": membership.get_relation_display(),
+        "status": membership.status,
+        "status_display": membership.get_status_display(),
+        "joined_at": membership.accepted_at,
+        "invited_at": membership.created_at,
+        "invite_expires_at": membership.invite_expires_at,
+        "can_edit": membership.relation != FamilyMembership.Relation.OWNER,
+        "can_remove": membership.relation != FamilyMembership.Relation.OWNER,
+    }
+
+
+def get_family_payload(family, subscription=None):
+    plan = subscription.plan if subscription else None
+    usage = get_family_usage(family, plan)
+
+    active_memberships = family.memberships.filter(
+        status=FamilyMembership.Status.ACTIVE,
+    ).select_related("user").order_by("id")
+
+    pending_memberships = family.memberships.filter(
+        status=FamilyMembership.Status.PENDING,
+    ).select_related("user").order_by("-id")
+
+    return {
+        "plan": {
+            "id": plan.id if plan else None,
+            "name": plan.name if plan else "No Active Plan",
+            "code": plan.code if plan else None,
+            "member_limit": plan.member_limit if plan else 1,
+        },
+        "usage": usage,
+        "active_members": [
+            family_member_item(membership)
+            for membership in active_memberships
+        ],
+        "pending_invites": [
+            {
+                **family_member_item(membership),
+                "invite_token": membership.invite_token,
+                "invite_link": f"http://127.0.0.1:3000/accept-invite/{membership.invite_token}",
+                "whatsapp_message": (
+                    f"You have been invited to join {family.name} on Mamamind. "
+                    f"Accept invite: http://127.0.0.1:3000/accept-invite/{membership.invite_token}"
+                ),
+            }
+            for membership in pending_memberships
+        ],
+    }
+
 
 
 class RegisterView(APIView):
@@ -534,28 +645,79 @@ class InviteFamilyMemberView(APIView):
                 status_code=status.HTTP_403_FORBIDDEN,
             )
 
+        owner_membership = get_owner_family_membership(request.user)
+
+        if not owner_membership:
+            return error_response(
+                message="Family owner profile not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        subscription = get_active_user_subscription(request.user)
+
+        if not subscription:
+            return error_response(
+                message="Active subscription required to invite family members",
+                data={"subscription": None},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        usage = get_family_usage(owner_membership.family, subscription.plan)
+
+        if usage["is_limit_reached"]:
+            return error_response(
+                message="Your current plan member limit has been reached. Please upgrade your plan.",
+                data={
+                    "usage": usage,
+                    "plan": {
+                        "id": subscription.plan.id,
+                        "name": subscription.plan.name,
+                        "code": subscription.plan.code,
+                        "member_limit": subscription.plan.member_limit,
+                    },
+                },
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
         serializer = InviteFamilyMemberSerializer(
             data=request.data,
             context={"request": request},
         )
 
         if not serializer.is_valid():
-            return error_response("Validation error", serializer.errors)
+            return error_response(
+                message="Validation error",
+                data=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
 
         membership = serializer.save()
+
+        updated_usage = get_family_usage(owner_membership.family, subscription.plan)
 
         return success_response(
             message="Family member invited successfully",
             data={
-                "member_id": membership.user.id,
-                "full_name": membership.user.full_name,
-                "email": membership.user.email,
-                "whatsapp_number": membership.user.whatsapp_number,
-                "role": membership.user.role,
-                "relation": membership.relation,
-                "status": membership.status,
-                "invite_token": membership.invite_token,
-                "invite_link": f"https://l9vtwvjb-8000.inc1.devtunnels.ms/accept-invite/{membership.invite_token}",
+                "invite": {
+                    "membership_id": membership.id,
+                    "user_id": membership.user.id,
+                    "full_name": membership.user.full_name,
+                    "email": public_email(membership.user),
+                    "whatsapp_number": membership.user.whatsapp_number,
+                    "role": membership.user.role,
+                    "relation": membership.relation,
+                    "relation_display": membership.get_relation_display(),
+                    "status": membership.status,
+                    "status_display": membership.get_status_display(),
+                    "invite_token": membership.invite_token,
+                    "invite_expires_at": membership.invite_expires_at,
+                    "invite_link": f"http://127.0.0.1:3000/accept-invite/{membership.invite_token}",
+                    "whatsapp_message": (
+                        f"You have been invited to join {owner_membership.family.name} on Mamamind. "
+                        f"Accept invite: http://127.0.0.1:3000/accept-invite/{membership.invite_token}"
+                    ),
+                },
+                "usage": updated_usage,
             },
             status_code=status.HTTP_201_CREATED,
         )
@@ -605,5 +767,302 @@ class AcceptInviteView(APIView):
             data={
                 "user": user_data(user),
                 "tokens": get_tokens_for_user(user),
+            },
+        )
+    
+
+
+class FamilyMemberListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        membership = get_user_family_membership(request.user)
+
+        if not membership:
+            return error_response(
+                message="Family not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        family = membership.family
+        owner = family.owner
+        subscription = get_active_user_subscription(owner)
+
+        return success_response(
+            message="Family members retrieved successfully",
+            data=get_family_payload(family, subscription),
+        )
+
+
+class FamilyMemberUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, membership_id):
+        if request.user.role != User.Role.FAMILY_OWNER:
+            return error_response(
+                message="Only family owner can update members",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        owner_membership = get_owner_family_membership(request.user)
+
+        if not owner_membership:
+            return error_response(
+                message="Family owner profile not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        membership = FamilyMembership.objects.filter(
+            id=membership_id,
+            family=owner_membership.family,
+            status=FamilyMembership.Status.ACTIVE,
+        ).select_related("user").first()
+
+        if not membership:
+            return error_response(
+                message="Active family member not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        if membership.relation == FamilyMembership.Relation.OWNER:
+            return error_response(
+                message="Owner profile cannot be edited from family members section",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        full_name = request.data.get("full_name")
+        whatsapp_number = request.data.get("whatsapp_number")
+        relation = request.data.get("relation")
+
+        allowed_relations = [
+            FamilyMembership.Relation.PARTNER,
+            FamilyMembership.Relation.CHILD,
+            FamilyMembership.Relation.PARENT,
+            FamilyMembership.Relation.CAREGIVER,
+            FamilyMembership.Relation.OTHER,
+        ]
+
+        if relation and relation not in allowed_relations:
+            return error_response(
+                message="Validation error",
+                data={"relation": ["Invalid relation"]},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if whatsapp_number:
+            exists = User.objects.filter(
+                whatsapp_number=whatsapp_number,
+            ).exclude(id=membership.user.id).exists()
+
+            if exists:
+                return error_response(
+                    message="Validation error",
+                    data={"whatsapp_number": ["WhatsApp number already exists"]},
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
+
+        user_update_fields = []
+
+        if full_name:
+            membership.user.full_name = full_name
+            user_update_fields.append("full_name")
+
+        if whatsapp_number:
+            membership.user.whatsapp_number = whatsapp_number
+            user_update_fields.append("whatsapp_number")
+
+        if user_update_fields:
+            membership.user.save(update_fields=user_update_fields)
+
+        if relation:
+            membership.relation = relation
+            membership.save(update_fields=["relation"])
+
+        return success_response(
+            message="Family member updated successfully",
+            data={
+                "member": family_member_item(membership),
+            },
+        )
+
+
+class RemoveFamilyMemberView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, membership_id):
+        if request.user.role != User.Role.FAMILY_OWNER:
+            return error_response(
+                message="Only family owner can remove members",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        owner_membership = get_owner_family_membership(request.user)
+
+        if not owner_membership:
+            return error_response(
+                message="Family owner profile not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        membership = FamilyMembership.objects.filter(
+            id=membership_id,
+            family=owner_membership.family,
+            status=FamilyMembership.Status.ACTIVE,
+        ).select_related("user").first()
+
+        if not membership:
+            return error_response(
+                message="Active family member not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        if membership.relation == FamilyMembership.Relation.OWNER:
+            return error_response(
+                message="Family owner cannot be removed",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        removed_member = {
+            "membership_id": membership.id,
+            "user_id": membership.user.id,
+            "full_name": membership.user.full_name,
+            "whatsapp_number": membership.user.whatsapp_number,
+            "status": "removed",
+        }
+
+        member_user = membership.user
+
+        membership.delete()
+
+        member_user.is_active = False
+        member_user.save(update_fields=["is_active"])
+
+        subscription = get_active_user_subscription(request.user)
+        usage = get_family_usage(
+            owner_membership.family,
+            subscription.plan if subscription else None,
+        )
+
+        return success_response(
+            message="Family member removed successfully",
+            data={
+                "removed_member": removed_member,
+                "usage": usage,
+            },
+        )
+
+
+class ResendFamilyInviteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, membership_id):
+        if request.user.role != User.Role.FAMILY_OWNER:
+            return error_response(
+                message="Only family owner can resend invites",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        owner_membership = get_owner_family_membership(request.user)
+
+        if not owner_membership:
+            return error_response(
+                message="Family owner profile not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        membership = FamilyMembership.objects.filter(
+            id=membership_id,
+            family=owner_membership.family,
+            status=FamilyMembership.Status.PENDING,
+        ).select_related("user").first()
+
+        if not membership:
+            return error_response(
+                message="Pending invite not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        membership.generate_invite_token()
+
+        return success_response(
+            message="Invite resent successfully",
+            data={
+                "invite": {
+                    "membership_id": membership.id,
+                    "full_name": membership.user.full_name,
+                    "email": public_email(membership.user),
+                    "whatsapp_number": membership.user.whatsapp_number,
+                    "relation": membership.relation,
+                    "relation_display": membership.get_relation_display(),
+                    "status": membership.status,
+                    "status_display": membership.get_status_display(),
+                    "invite_token": membership.invite_token,
+                    "invite_expires_at": membership.invite_expires_at,
+                    "invite_link": f"http://127.0.0.1:3000/accept-invite/{membership.invite_token}",
+                    "whatsapp_message": (
+                        f"You have been invited to join {owner_membership.family.name} on Mamamind. "
+                        f"Accept invite: http://127.0.0.1:3000/accept-invite/{membership.invite_token}"
+                    ),
+                }
+            },
+        )
+
+
+class CancelFamilyInviteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, membership_id):
+        if request.user.role != User.Role.FAMILY_OWNER:
+            return error_response(
+                message="Only family owner can cancel invites",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        owner_membership = get_owner_family_membership(request.user)
+
+        if not owner_membership:
+            return error_response(
+                message="Family owner profile not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        membership = FamilyMembership.objects.filter(
+            id=membership_id,
+            family=owner_membership.family,
+            status=FamilyMembership.Status.PENDING,
+        ).select_related("user").first()
+
+        if not membership:
+            return error_response(
+                message="Pending invite not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        cancelled_invite = {
+            "membership_id": membership.id,
+            "user_id": membership.user.id,
+            "full_name": membership.user.full_name,
+            "whatsapp_number": membership.user.whatsapp_number,
+            "status": "removed",
+        }
+
+        invited_user = membership.user
+
+        membership.delete()
+
+        invited_user.is_active = False
+        invited_user.save(update_fields=["is_active"])
+
+        subscription = get_active_user_subscription(request.user)
+        usage = get_family_usage(
+            owner_membership.family,
+            subscription.plan if subscription else None,
+        )
+
+        return success_response(
+            message="Invite cancelled successfully",
+            data={
+                "cancelled_invite": cancelled_invite,
+                "usage": usage,
             },
         )
