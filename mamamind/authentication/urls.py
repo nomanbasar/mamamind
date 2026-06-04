@@ -18,6 +18,7 @@ from .views import (
     RemoveFamilyMemberView,
     ResendFamilyInviteView,
     CancelFamilyInviteView,
+    UserProfileView,
 )
 
 urlpatterns = [
@@ -27,6 +28,8 @@ urlpatterns = [
 
     path("login/", LoginView.as_view()),
     path("logout/", LogoutView.as_view()),
+
+    path("profile/", UserProfileView.as_view()),
 
     path("forgot-password/", ForgotPasswordView.as_view()),
     path("resend-forgot-password-otp/", ResendForgotPasswordOTPView.as_view()),

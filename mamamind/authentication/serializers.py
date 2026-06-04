@@ -283,6 +283,7 @@ class AcceptInviteSerializer(serializers.Serializer):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
+    profile_image = serializers.ImageField(required=False, allow_null=True)
     profile_image_url = serializers.SerializerMethodField()
     family = serializers.SerializerMethodField()
     subscription = serializers.SerializerMethodField()
@@ -310,6 +311,16 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "family",
             "subscription",
         ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+
+        if instance.profile_image:
+            data["profile_image"] = instance.profile_image.url
+        else:
+            data["profile_image"] = None
+
+        return data
 
     def get_profile_image_url(self, obj):
         request = self.context.get("request")
@@ -372,3 +383,4 @@ class UserProfileSerializer(serializers.ModelSerializer):
                 "member_limit": subscription.plan.member_limit,
             }
         }
+
