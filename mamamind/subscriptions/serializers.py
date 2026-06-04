@@ -109,3 +109,63 @@ class CheckoutSerializer(serializers.Serializer):
 
 class CancelSubscriptionSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+
+
+class UserSubscriptionInvoiceSerializer(serializers.ModelSerializer):
+    invoice_number = serializers.SerializerMethodField()
+    date = serializers.SerializerMethodField()
+    plan = serializers.SerializerMethodField()
+    amount = serializers.SerializerMethodField()
+    currency = serializers.SerializerMethodField()
+    status_display = serializers.SerializerMethodField()
+    pdf_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserSubscription
+        fields = [
+            "id",
+            "invoice_number",
+            "date",
+            "plan",
+            "amount",
+            "currency",
+            "status",
+            "status_display",
+            "pdf_url",
+            "stripe_checkout_session_id",
+            "created_at",
+        ]
+
+    def get_invoice_number(self, obj):
+        year = obj.created_at.year if obj.created_at else 2026
+        return f"INV-{year}-{obj.id:03d}"
+
+    def get_date(self, obj):
+        if obj.current_period_start:
+            return obj.current_period_start.date()
+        if obj.created_at:
+            return obj.created_at.date()
+        return None
+
+    def get_plan(self, obj):
+        return obj.plan.name if obj.plan else None
+
+    def get_amount(self, obj):
+        if obj.plan:
+            return str(obj.plan.price)
+        return "0.00"
+
+    def get_currency(self, obj):
+        if obj.plan:
+            return obj.plan.currency
+        return "usd"
+
+    def get_status_display(self, obj):
+        if hasattr(obj, "get_status_display"):
+            return obj.get_status_display()
+        return obj.status
+
+    def get_pdf_url(self, obj):
+        return None
