@@ -13,7 +13,6 @@ from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIV
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
 from .models import SubscriptionPlan, UserSubscription
 from .permissions import IsAdminUserRole
 from .serializers import (
@@ -22,6 +21,7 @@ from .serializers import (
     UserSubscriptionSerializer,
     CheckoutSerializer,
     CancelSubscriptionSerializer,
+    UserSubscriptionInvoiceSerializer
 )
 
 
@@ -624,4 +624,28 @@ class CancelSubscriptionView(APIView):
             data={
                 "subscription": UserSubscriptionSerializer(subscription).data,
             },
+        )
+    
+
+
+class UserSubscriptionInvoiceHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        subscriptions = UserSubscription.objects.filter(
+            user=request.user
+        ).select_related("plan").order_by("-created_at", "-id")
+
+        serializer = UserSubscriptionInvoiceSerializer(
+            subscriptions,
+            many=True,
+            context={"request": request}
+        )
+
+        return success_response(
+            message="Invoice history retrieved successfully",
+            data={
+                "invoices": serializer.data
+            },
+            status_code=status.HTTP_200_OK,
         )
