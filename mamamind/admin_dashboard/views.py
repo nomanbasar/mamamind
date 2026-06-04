@@ -55,16 +55,31 @@ def percent(value):
 
 
 def percentage_change(current, previous):
+    """
+    Previous period 0 হলে real percentage change calculate করা যায় না.
+    Current > 0 এবং previous = 0 হলে None return করব.
+    Frontend চাইলে এই case-এ 'New this period' দেখাবে.
+    """
     current = Decimal(current or 0)
     previous = Decimal(previous or 0)
 
     if previous == 0:
         if current == 0:
             return "0.00"
-        return "100.00"
+        return None
 
     result = ((current - previous) / previous) * Decimal("100")
     return f"{result:.2f}"
+
+
+def change_label(current, previous, default_label):
+    current = Decimal(current or 0)
+    previous = Decimal(previous or 0)
+
+    if previous == 0 and current > 0:
+        return "New this period"
+
+    return default_label
 
 
 def subscription_revenue(queryset):
@@ -106,7 +121,10 @@ def build_monthly_revenue_chart():
             created_at__date__gte=month_start,
             created_at__date__lt=next_month_start,
         ).exclude(
-            status__in=["incomplete", "failed"]
+            status__in=[
+                UserSubscription.Status.INCOMPLETE,
+                UserSubscription.Status.CANCELLED,
+            ]
         ).select_related("plan")
 
         revenue = subscription_revenue(monthly_subscriptions)
@@ -201,8 +219,10 @@ class AdminDashboardOverviewView(APIView):
         previous_start = current_start - timedelta(days=days)
 
         users_qs = User.objects.exclude(role=User.Role.ADMIN)
+        family_owner_qs = User.objects.filter(role=User.Role.FAMILY_OWNER)
 
         total_users = users_qs.count()
+        total_family_owners = family_owner_qs.count()
 
         users_this_period = users_qs.filter(
             date_joined__gte=current_start
@@ -219,9 +239,20 @@ class AdminDashboardOverviewView(APIView):
 
         active_subscription_count = active_subscriptions_qs.count()
 
-        if total_users > 0:
+        active_subscriptions_this_period = UserSubscription.objects.filter(
+            status=UserSubscription.Status.ACTIVE,
+            created_at__gte=current_start,
+        ).count()
+
+        active_subscriptions_previous_period = UserSubscription.objects.filter(
+            status=UserSubscription.Status.ACTIVE,
+            created_at__gte=previous_start,
+            created_at__lt=current_start,
+        ).count()
+
+        if total_family_owners > 0:
             active_subscription_ratio = (
-                Decimal(active_subscription_count) / Decimal(total_users)
+                Decimal(active_subscription_count) / Decimal(total_family_owners)
             ) * Decimal("100")
         else:
             active_subscription_ratio = Decimal("0.00")
@@ -229,14 +260,20 @@ class AdminDashboardOverviewView(APIView):
         current_paid_subscriptions = UserSubscription.objects.filter(
             created_at__gte=current_start,
         ).exclude(
-            status__in=["incomplete", "failed"]
+            status__in=[
+                UserSubscription.Status.INCOMPLETE,
+                UserSubscription.Status.CANCELLED,
+            ]
         ).select_related("plan")
 
         previous_paid_subscriptions = UserSubscription.objects.filter(
             created_at__gte=previous_start,
             created_at__lt=current_start,
         ).exclude(
-            status__in=["incomplete", "failed"]
+            status__in=[
+                UserSubscription.Status.INCOMPLETE,
+                UserSubscription.Status.CANCELLED,
+            ]
         ).select_related("plan")
 
         current_revenue = subscription_revenue(current_paid_subscriptions)
@@ -245,6 +282,12 @@ class AdminDashboardOverviewView(APIView):
         cancelled_this_period = UserSubscription.objects.filter(
             status=UserSubscription.Status.CANCELLED,
             updated_at__gte=current_start,
+        ).count()
+
+        cancelled_previous_period = UserSubscription.objects.filter(
+            status=UserSubscription.Status.CANCELLED,
+            updated_at__gte=previous_start,
+            updated_at__lt=current_start,
         ).count()
 
         total_active_or_cancelled = UserSubscription.objects.filter(
@@ -260,12 +303,6 @@ class AdminDashboardOverviewView(APIView):
             ) * Decimal("100")
         else:
             churn_rate = Decimal("0.00")
-
-        cancelled_previous_period = UserSubscription.objects.filter(
-            status=UserSubscription.Status.CANCELLED,
-            updated_at__gte=previous_start,
-            updated_at__lt=current_start,
-        ).count()
 
         previous_active_or_cancelled = UserSubscription.objects.filter(
             status__in=[
@@ -302,12 +339,29 @@ class AdminDashboardOverviewView(APIView):
                             users_this_period,
                             users_previous_period,
                         ),
-                        "change_label": f"+{users_this_period} this period",
+                        "change_label": change_label(
+                            users_this_period,
+                            users_previous_period,
+                            f"+{users_this_period} this period",
+                        ),
+                        "new_this_period": users_this_period,
+                        "previous_period": users_previous_period,
                     },
                     "active_subscriptions": {
                         "value": active_subscription_count,
-                        "change_percent": "0.00",
-                        "change_label": f"{active_subscription_ratio:.1f}% of total users",
+                        "change_percent": percentage_change(
+                            active_subscriptions_this_period,
+                            active_subscriptions_previous_period,
+                        ),
+                        "change_label": change_label(
+                            active_subscriptions_this_period,
+                            active_subscriptions_previous_period,
+                            "vs previous period",
+                        ),
+                        "ratio_label": f"{active_subscription_ratio:.1f}% of family owners",
+                        "total_family_owners": total_family_owners,
+                        "new_this_period": active_subscriptions_this_period,
+                        "previous_period": active_subscriptions_previous_period,
                     },
                     "monthly_revenue": {
                         "value": money(current_revenue),
@@ -316,7 +370,12 @@ class AdminDashboardOverviewView(APIView):
                             current_revenue,
                             previous_revenue,
                         ),
-                        "change_label": "vs previous period",
+                        "change_label": change_label(
+                            current_revenue,
+                            previous_revenue,
+                            "vs previous period",
+                        ),
+                        "previous_period_revenue": money(previous_revenue),
                     },
                     "churn_rate": {
                         "value": percent(churn_rate),
@@ -324,7 +383,13 @@ class AdminDashboardOverviewView(APIView):
                             churn_rate,
                             previous_churn_rate,
                         ),
-                        "change_label": "vs previous period",
+                        "change_label": change_label(
+                            churn_rate,
+                            previous_churn_rate,
+                            "vs previous period",
+                        ),
+                        "cancelled_this_period": cancelled_this_period,
+                        "cancelled_previous_period": cancelled_previous_period,
                     },
                 },
                 "monthly_revenue_chart": build_monthly_revenue_chart(),
