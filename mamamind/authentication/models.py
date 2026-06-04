@@ -44,6 +44,7 @@ class User(AbstractUser):
     whatsapp_number = models.CharField(max_length=30, unique=True, null=True, blank=True)
     role = models.CharField(max_length=30, choices=Role.choices, default=Role.FAMILY_OWNER)
     is_email_verified = models.BooleanField(default=False)
+    profile_image = models.ImageField(upload_to="profile_images/",null=True,blank=True)
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["full_name"]
