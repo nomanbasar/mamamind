@@ -711,6 +711,29 @@ def admin_subscription_date_display(value):
     return timezone.localtime(value).strftime("%b %d, %Y")
 
 
+def admin_subscription_percentage_change(current, previous):
+    current = Decimal(current or 0)
+    previous = Decimal(previous or 0)
+
+    if previous == 0:
+        if current == 0:
+            return "0.00"
+        return None
+
+    result = ((current - previous) / previous) * Decimal("100")
+    return f"{result:.2f}"
+
+
+def admin_subscription_change_label(current, previous, default_label):
+    current = Decimal(current or 0)
+    previous = Decimal(previous or 0)
+
+    if previous == 0 and current > 0:
+        return "New this period"
+
+    return default_label
+
+
 def admin_subscription_user_data(user, request=None):
     profile_image = None
     profile_image_url = None
@@ -750,6 +773,7 @@ def admin_subscription_plan_data(plan):
         "price": str(plan.price),
         "currency": plan.currency,
         "billing_cycle": plan.billing_cycle,
+        "billing_cycle_display": plan.get_billing_cycle_display(),
         "member_limit": plan.member_limit,
     }
 
@@ -770,6 +794,13 @@ def admin_subscription_item(subscription, request=None):
 
     start_source = subscription.current_period_start or subscription.created_at
 
+    cancelled_at = None
+    cancelled_at_display = None
+
+    if subscription.status == UserSubscription.Status.CANCELLED:
+        cancelled_at = admin_subscription_date_only(subscription.cancelled_at)
+        cancelled_at_display = admin_subscription_date_display(subscription.cancelled_at)
+
     return {
         "id": subscription.id,
         "subscriber": admin_subscription_user_data(user, request),
@@ -785,8 +816,8 @@ def admin_subscription_item(subscription, request=None):
         "status": subscription.status,
         "status_display": admin_subscription_status_display(subscription.status),
         "cancel_at_period_end": subscription.cancel_at_period_end,
-        "cancelled_at": admin_subscription_date_only(subscription.cancelled_at),
-        "cancelled_at_display": admin_subscription_date_display(subscription.cancelled_at),
+        "cancelled_at": cancelled_at,
+        "cancelled_at_display": cancelled_at_display,
         "stripe_customer_id": subscription.stripe_customer_id,
         "stripe_subscription_id": subscription.stripe_subscription_id,
         "stripe_checkout_session_id": subscription.stripe_checkout_session_id,
@@ -839,6 +870,8 @@ class AdminSubscriptionListView(APIView):
 
         now = timezone.now()
         period_start = now - timedelta(days=days)
+        previous_period_start = period_start - timedelta(days=days)
+
         month_start = timezone.localtime(now).replace(
             day=1,
             hour=0,
@@ -846,7 +879,18 @@ class AdminSubscriptionListView(APIView):
             second=0,
             microsecond=0,
         )
+
+        previous_month_last_day = month_start - timedelta(days=1)
+        previous_month_start = previous_month_last_day.replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
         next_7_days = now + timedelta(days=7)
+        previous_7_days_start = now - timedelta(days=7)
 
         base_qs = UserSubscription.objects.select_related(
             "user",
@@ -862,15 +906,38 @@ class AdminSubscriptionListView(APIView):
 
         paused_count = 0
 
+        active_this_period = base_qs.filter(
+            status=UserSubscription.Status.ACTIVE,
+            created_at__gte=period_start,
+        ).count()
+
+        active_previous_period = base_qs.filter(
+            status=UserSubscription.Status.ACTIVE,
+            created_at__gte=previous_period_start,
+            created_at__lt=period_start,
+        ).count()
+
         cancelled_this_month = base_qs.filter(
             status=UserSubscription.Status.CANCELLED,
             updated_at__gte=month_start,
+        ).count()
+
+        cancelled_previous_month = base_qs.filter(
+            status=UserSubscription.Status.CANCELLED,
+            updated_at__gte=previous_month_start,
+            updated_at__lt=month_start,
         ).count()
 
         upcoming_renewals_7d = base_qs.filter(
             status=UserSubscription.Status.ACTIVE,
             current_period_end__gte=now,
             current_period_end__lte=next_7_days,
+        ).count()
+
+        previous_renewals_7d = base_qs.filter(
+            status=UserSubscription.Status.ACTIVE,
+            current_period_end__gte=previous_7_days_start,
+            current_period_end__lt=now,
         ).count()
 
         subscriptions_qs = base_qs
@@ -943,22 +1010,70 @@ class AdminSubscriptionListView(APIView):
                 "stats": {
                     "active_subscriptions": {
                         "value": active_count,
+                        "change_percent": admin_subscription_percentage_change(
+                            active_this_period,
+                            active_previous_period,
+                        ),
+                        "change_label": admin_subscription_change_label(
+                            active_this_period,
+                            active_previous_period,
+                            "currently active",
+                        ),
+                        "new_this_period": active_this_period,
+                        "previous_period": active_previous_period,
                     },
                     "cancelled_this_month": {
                         "value": cancelled_this_month,
+                        "change_percent": admin_subscription_percentage_change(
+                            cancelled_this_month,
+                            cancelled_previous_month,
+                        ),
+                        "change_label": admin_subscription_change_label(
+                            cancelled_this_month,
+                            cancelled_previous_month,
+                            "vs previous month",
+                        ),
+                        "previous_month": cancelled_previous_month,
                     },
                     "upcoming_renewals_7d": {
                         "value": upcoming_renewals_7d,
+                        "change_percent": admin_subscription_percentage_change(
+                            upcoming_renewals_7d,
+                            previous_renewals_7d,
+                        ),
+                        "change_label": f"+{upcoming_renewals_7d} renewals this week",
+                        "previous_7_days": previous_renewals_7d,
                     },
                 },
                 "tabs": {
-                    "all": all_count,
-                    "active": active_count,
-                    "cancelled": cancelled_count,
-                    "expired": expired_count,
-                    "past_due": past_due_count,
-                    "incomplete": incomplete_count,
-                    "paused": paused_count,
+                    "all": {
+                        "label": "All",
+                        "count": all_count,
+                    },
+                    "active": {
+                        "label": "Active",
+                        "count": active_count,
+                    },
+                    "cancelled": {
+                        "label": "Cancelled",
+                        "count": cancelled_count,
+                    },
+                    "expired": {
+                        "label": "Expired",
+                        "count": expired_count,
+                    },
+                    "past_due": {
+                        "label": "Past Due",
+                        "count": past_due_count,
+                    },
+                    "incomplete": {
+                        "label": "Incomplete",
+                        "count": incomplete_count,
+                    },
+                    "paused": {
+                        "label": "Paused",
+                        "count": paused_count,
+                    },
                 },
                 "filters": {
                     "search": search,
@@ -970,6 +1085,3 @@ class AdminSubscriptionListView(APIView):
             },
             status_code=status.HTTP_200_OK,
         )
-
-
-
