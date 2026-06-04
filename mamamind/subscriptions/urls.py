@@ -11,6 +11,7 @@ from .views import (
     CancelSubscriptionView,
     StripePaymentSuccessView,
     StripePaymentCancelView,
+    UserSubscriptionInvoiceHistoryView,
 )
 
 
@@ -29,4 +30,6 @@ urlpatterns = [
     path("payment/cancel/", StripePaymentCancelView.as_view()),
 
     path("stripe/webhook/", StripeWebhookView.as_view()),
+
+    path("invoices/", UserSubscriptionInvoiceHistoryView.as_view()),
 ]
