@@ -279,3 +279,96 @@ class AcceptInviteSerializer(serializers.Serializer):
         attrs["email"] = email
         attrs["membership"] = membership
         return attrs
+    
+
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    profile_image_url = serializers.SerializerMethodField()
+    family = serializers.SerializerMethodField()
+    subscription = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "full_name",
+            "email",
+            "whatsapp_number",
+            "role",
+            "is_email_verified",
+            "profile_image",
+            "profile_image_url",
+            "family",
+            "subscription",
+        ]
+        read_only_fields = [
+            "id",
+            "email",
+            "role",
+            "is_email_verified",
+            "profile_image_url",
+            "family",
+            "subscription",
+        ]
+
+    def get_profile_image_url(self, obj):
+        request = self.context.get("request")
+
+        if obj.profile_image:
+            if request:
+                return request.build_absolute_uri(obj.profile_image.url)
+            return obj.profile_image.url
+
+        return None
+
+    def get_family(self, obj):
+        membership = obj.family_memberships.filter(
+            status=FamilyMembership.Status.ACTIVE
+        ).select_related("family").first()
+
+        if not membership:
+            return None
+
+        return {
+            "id": membership.family.id,
+            "name": membership.family.name,
+            "relation": membership.relation,
+            "relation_display": membership.get_relation_display(),
+            "member_status": membership.status,
+            "member_status_display": membership.get_status_display(),
+        }
+
+    def get_subscription(self, obj):
+        try:
+            from subscriptions.models import UserSubscription
+        except Exception:
+            return None
+
+        membership = obj.family_memberships.filter(
+            status=FamilyMembership.Status.ACTIVE
+        ).select_related("family", "family__owner").first()
+
+        if not membership:
+            return None
+
+        subscription = UserSubscription.objects.filter(
+            user=membership.family.owner,
+            status=UserSubscription.Status.ACTIVE,
+        ).select_related("plan").order_by("-id").first()
+
+        if not subscription:
+            return None
+
+        return {
+            "id": subscription.id,
+            "status": subscription.status,
+            "plan": {
+                "id": subscription.plan.id,
+                "name": subscription.plan.name,
+                "code": subscription.plan.code,
+                "price": str(subscription.plan.price),
+                "currency": subscription.plan.currency,
+                "billing_cycle": subscription.plan.billing_cycle,
+                "member_limit": subscription.plan.member_limit,
+            }
+        }
