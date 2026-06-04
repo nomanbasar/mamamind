@@ -669,3 +669,307 @@ class AdminUserListView(APIView):
             },
             status_code=status.HTTP_200_OK,
         )
+    
+
+
+def admin_subscription_initials(full_name):
+    if not full_name:
+        return ""
+
+    parts = full_name.strip().split()
+
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+
+    return f"{parts[0][0]}{parts[-1][0]}".upper()
+
+
+def admin_subscription_status_display(status_value):
+    status_map = {
+        UserSubscription.Status.INCOMPLETE: "Incomplete",
+        UserSubscription.Status.ACTIVE: "Active",
+        UserSubscription.Status.CANCELLED: "Cancelled",
+        UserSubscription.Status.EXPIRED: "Expired",
+        UserSubscription.Status.PAST_DUE: "Past Due",
+        "paused": "Paused",
+    }
+
+    return status_map.get(status_value, str(status_value).replace("_", " ").title())
+
+
+def admin_subscription_date_only(value):
+    if not value:
+        return None
+
+    return timezone.localtime(value).date()
+
+
+def admin_subscription_date_display(value):
+    if not value:
+        return None
+
+    return timezone.localtime(value).strftime("%b %d, %Y")
+
+
+def admin_subscription_user_data(user, request=None):
+    profile_image = None
+    profile_image_url = None
+
+    if getattr(user, "profile_image", None):
+        try:
+            profile_image = user.profile_image.url
+            profile_image_url = (
+                request.build_absolute_uri(user.profile_image.url)
+                if request
+                else user.profile_image.url
+            )
+        except Exception:
+            profile_image = None
+            profile_image_url = None
+
+    return {
+        "id": user.id,
+        "full_name": user.full_name,
+        "email": user.email,
+        "whatsapp_number": user.whatsapp_number,
+        "initials": admin_subscription_initials(user.full_name),
+        "role": user.role,
+        "profile_image": profile_image,
+        "profile_image_url": profile_image_url,
+    }
+
+
+def admin_subscription_plan_data(plan):
+    if not plan:
+        return None
+
+    return {
+        "id": plan.id,
+        "name": plan.name,
+        "code": plan.code,
+        "price": str(plan.price),
+        "currency": plan.currency,
+        "billing_cycle": plan.billing_cycle,
+        "member_limit": plan.member_limit,
+    }
+
+
+def admin_subscription_item(subscription, request=None):
+    plan = subscription.plan
+    user = subscription.user
+
+    next_renewal = None
+    next_renewal_display = None
+
+    if (
+        subscription.status == UserSubscription.Status.ACTIVE
+        and subscription.current_period_end
+    ):
+        next_renewal = admin_subscription_date_only(subscription.current_period_end)
+        next_renewal_display = admin_subscription_date_display(subscription.current_period_end)
+
+    start_source = subscription.current_period_start or subscription.created_at
+
+    return {
+        "id": subscription.id,
+        "subscriber": admin_subscription_user_data(user, request),
+        "plan": admin_subscription_plan_data(plan),
+        "billing_cycle": plan.billing_cycle if plan else None,
+        "billing_cycle_display": plan.get_billing_cycle_display() if plan else None,
+        "amount": str(plan.price) if plan else "0.00",
+        "currency": plan.currency if plan else "usd",
+        "start_date": admin_subscription_date_only(start_source),
+        "start_date_display": admin_subscription_date_display(start_source),
+        "next_renewal": next_renewal,
+        "next_renewal_display": next_renewal_display,
+        "status": subscription.status,
+        "status_display": admin_subscription_status_display(subscription.status),
+        "cancel_at_period_end": subscription.cancel_at_period_end,
+        "cancelled_at": admin_subscription_date_only(subscription.cancelled_at),
+        "cancelled_at_display": admin_subscription_date_display(subscription.cancelled_at),
+        "stripe_customer_id": subscription.stripe_customer_id,
+        "stripe_subscription_id": subscription.stripe_subscription_id,
+        "stripe_checkout_session_id": subscription.stripe_checkout_session_id,
+        "created_at": subscription.created_at,
+        "updated_at": subscription.updated_at,
+    }
+
+
+class AdminSubscriptionListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not is_admin_user(request.user):
+            return error_response(
+                message="Only admin can access this resource",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        search = request.query_params.get("search", "").strip()
+        plan = request.query_params.get("plan", "").strip()
+        subscription_status = request.query_params.get("status", "all").strip().lower()
+        billing_cycle = request.query_params.get("billing_cycle", "").strip().lower()
+
+        try:
+            days = int(request.query_params.get("days", 30))
+        except ValueError:
+            days = 30
+
+        if days not in [7, 30, 90, 180, 365]:
+            days = 30
+
+        try:
+            page = int(request.query_params.get("page", 1))
+        except ValueError:
+            page = 1
+
+        try:
+            page_size = int(request.query_params.get("page_size", 10))
+        except ValueError:
+            page_size = 10
+
+        if page < 1:
+            page = 1
+
+        if page_size < 1:
+            page_size = 10
+
+        if page_size > 100:
+            page_size = 100
+
+        now = timezone.now()
+        period_start = now - timedelta(days=days)
+        month_start = timezone.localtime(now).replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        next_7_days = now + timedelta(days=7)
+
+        base_qs = UserSubscription.objects.select_related(
+            "user",
+            "plan",
+        ).order_by("-created_at", "-id")
+
+        all_count = base_qs.count()
+        active_count = base_qs.filter(status=UserSubscription.Status.ACTIVE).count()
+        cancelled_count = base_qs.filter(status=UserSubscription.Status.CANCELLED).count()
+        expired_count = base_qs.filter(status=UserSubscription.Status.EXPIRED).count()
+        past_due_count = base_qs.filter(status=UserSubscription.Status.PAST_DUE).count()
+        incomplete_count = base_qs.filter(status=UserSubscription.Status.INCOMPLETE).count()
+
+        paused_count = 0
+
+        cancelled_this_month = base_qs.filter(
+            status=UserSubscription.Status.CANCELLED,
+            updated_at__gte=month_start,
+        ).count()
+
+        upcoming_renewals_7d = base_qs.filter(
+            status=UserSubscription.Status.ACTIVE,
+            current_period_end__gte=now,
+            current_period_end__lte=next_7_days,
+        ).count()
+
+        subscriptions_qs = base_qs
+
+        if search:
+            subscriptions_qs = subscriptions_qs.filter(
+                Q(user__full_name__icontains=search)
+                | Q(user__email__icontains=search)
+                | Q(user__whatsapp_number__icontains=search)
+                | Q(plan__name__icontains=search)
+                | Q(plan__code__icontains=search)
+                | Q(stripe_customer_id__icontains=search)
+                | Q(stripe_subscription_id__icontains=search)
+                | Q(stripe_checkout_session_id__icontains=search)
+            )
+
+        if subscription_status and subscription_status != "all":
+            subscriptions_qs = subscriptions_qs.filter(status=subscription_status)
+
+        if plan and plan.lower() != "all":
+            if plan.isdigit():
+                subscriptions_qs = subscriptions_qs.filter(plan_id=int(plan))
+            else:
+                subscriptions_qs = subscriptions_qs.filter(plan__code=plan)
+
+        if billing_cycle and billing_cycle != "all":
+            if billing_cycle == "annual":
+                billing_cycle = SubscriptionPlan.BillingCycle.YEARLY
+
+            subscriptions_qs = subscriptions_qs.filter(plan__billing_cycle=billing_cycle)
+
+        filtered_count = subscriptions_qs.count()
+        total_pages = ceil(filtered_count / page_size) if filtered_count > 0 else 1
+
+        if page > total_pages:
+            page = total_pages
+
+        start_index = (page - 1) * page_size
+        end_index = start_index + page_size
+
+        subscriptions = subscriptions_qs[start_index:end_index]
+
+        results = [
+            admin_subscription_item(subscription, request)
+            for subscription in subscriptions
+        ]
+
+        next_page = page + 1 if page < total_pages else None
+        previous_page = page - 1 if page > 1 else None
+
+        return success_response(
+            message="Admin subscriptions retrieved successfully",
+            data={
+                "period": {
+                    "label": f"{days} days",
+                    "days": days,
+                    "start": period_start,
+                    "end": now,
+                },
+                "summary": {
+                    "total_subscriptions": all_count,
+                    "filtered_count": filtered_count,
+                    "showing": len(results),
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                    "next_page": next_page,
+                    "previous_page": previous_page,
+                },
+                "stats": {
+                    "active_subscriptions": {
+                        "value": active_count,
+                    },
+                    "cancelled_this_month": {
+                        "value": cancelled_this_month,
+                    },
+                    "upcoming_renewals_7d": {
+                        "value": upcoming_renewals_7d,
+                    },
+                },
+                "tabs": {
+                    "all": all_count,
+                    "active": active_count,
+                    "cancelled": cancelled_count,
+                    "expired": expired_count,
+                    "past_due": past_due_count,
+                    "incomplete": incomplete_count,
+                    "paused": paused_count,
+                },
+                "filters": {
+                    "search": search,
+                    "plan": plan or "all",
+                    "status": subscription_status or "all",
+                    "billing_cycle": billing_cycle or "all",
+                },
+                "results": results,
+            },
+            status_code=status.HTTP_200_OK,
+        )
+
+
+
