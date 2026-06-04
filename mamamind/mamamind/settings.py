@@ -48,7 +48,8 @@ INSTALLED_APPS = [
     'faqs',
     'contact',
     'subscriptions',
-    'reminders'
+    'reminders',
+    "admin_dashboard",
 ]
 
 MIDDLEWARE = [
