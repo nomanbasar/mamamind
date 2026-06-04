@@ -8,6 +8,9 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import User, OTP, Family, FamilyMembership
 from subscriptions.models import UserSubscription
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from django.db.models import Q
+from reminders.models import Reminder
+
 from .serializers import (
     RegisterSerializer,
     VerifyEmailOTPSerializer,
@@ -1118,3 +1121,196 @@ class CancelFamilyInviteView(APIView):
                 "usage": usage,
             },
         )
+    
+
+
+def dashboard_member_initials(full_name):
+    if not full_name:
+        return ""
+
+    parts = full_name.strip().split()
+
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+
+    return f"{parts[0][0]}{parts[-1][0]}".upper()
+
+
+def dashboard_member_item(membership, request=None):
+    user = membership.user
+
+    profile_image = None
+    profile_image_url = None
+
+    if getattr(user, "profile_image", None):
+        try:
+            profile_image = user.profile_image.url
+            profile_image_url = (
+                request.build_absolute_uri(user.profile_image.url)
+                if request
+                else user.profile_image.url
+            )
+        except Exception:
+            profile_image = None
+            profile_image_url = None
+
+    return {
+        "membership_id": membership.id,
+        "user_id": user.id,
+        "full_name": user.full_name,
+        "email": public_email(user),
+        "whatsapp_number": user.whatsapp_number,
+        "role": user.role,
+        "relation": membership.relation,
+        "relation_display": membership.get_relation_display(),
+        "status": membership.status,
+        "status_display": membership.get_status_display(),
+        "initials": dashboard_member_initials(user.full_name),
+        "profile_image": profile_image,
+        "profile_image_url": profile_image_url,
+        "joined_at": membership.accepted_at,
+        "invited_at": membership.created_at,
+    }
+
+
+def dashboard_reminder_item(reminder):
+    if not reminder:
+        return None
+
+    return {
+        "id": reminder.id,
+        "title": reminder.title,
+        "owner_id": reminder.owner.id if reminder.owner else None,
+        "owner_name": reminder.owner.full_name if reminder.owner else "Family",
+        "date": reminder.reminder_date,
+        "time": reminder.reminder_time,
+        "visibility": reminder.visibility,
+        "visibility_display": reminder.get_visibility_display(),
+        "recurring": reminder.recurring,
+        "recurring_display": reminder.get_recurring_display(),
+        "is_completed": reminder.is_completed,
+        "is_overdue": reminder.is_overdue,
+    }
+
+
+def dashboard_visible_reminders(user, family):
+    reminders = Reminder.objects.filter(
+        family=family,
+    ).select_related(
+        "owner",
+        "created_by",
+        "family",
+    )
+
+    if family.owner_id == user.id:
+        return reminders
+
+    return reminders.filter(
+        Q(visibility=Reminder.Visibility.SHARED)
+        | Q(owner=user)
+        | Q(created_by=user)
+    )
+
+
+class DashboardOverviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        membership = get_user_family_membership(request.user)
+
+        if not membership:
+            return error_response(
+                message="Family not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        family = membership.family
+        owner = family.owner
+
+        subscription = get_active_user_subscription(owner)
+
+        if not subscription:
+            return error_response(
+                message="Active subscription required to view dashboard",
+                data={
+                    "active_plan": None,
+                },
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        active_memberships = family.memberships.filter(
+            status=FamilyMembership.Status.ACTIVE,
+        ).select_related("user").order_by("id")
+
+        pending_memberships = family.memberships.filter(
+            status=FamilyMembership.Status.PENDING,
+        ).select_related("user").order_by("-id")
+
+        usage = get_family_usage(family, subscription.plan)
+
+        visible_reminders = dashboard_visible_reminders(request.user, family)
+
+        now = timezone.localtime()
+        today = now.date()
+
+        upcoming_reminders_qs = visible_reminders.filter(
+            is_completed=False,
+        ).filter(
+            Q(reminder_date__gt=today)
+            | Q(reminder_date=today, reminder_time__gte=now.time())
+        ).order_by("reminder_date", "reminder_time")
+
+        next_reminder = upcoming_reminders_qs.first()
+
+        active_plan = {
+            "id": subscription.id,
+            "name": subscription.plan.name,
+            "code": subscription.plan.code,
+            "price": str(subscription.plan.price),
+            "currency": subscription.plan.currency,
+            "billing_cycle": subscription.plan.billing_cycle,
+            "member_limit": subscription.plan.member_limit,
+            "status": subscription.status,
+            "status_display": subscription.get_status_display(),
+            "renews_at": subscription.current_period_end.date() if subscription.current_period_end else None,
+            "current_period_start": subscription.current_period_start,
+            "current_period_end": subscription.current_period_end,
+        }
+
+        family_members = {
+            "connected": active_memberships.count(),
+            "pending_invites": pending_memberships.count(),
+            "member_limit": subscription.plan.member_limit,
+            "used": usage["used"],
+            "remaining": usage["remaining"],
+            "is_limit_reached": usage["is_limit_reached"],
+        }
+
+        upcoming_reminders = [
+            dashboard_reminder_item(reminder)
+            for reminder in upcoming_reminders_qs[:4]
+        ]
+
+        members = [
+            dashboard_member_item(item, request)
+            for item in active_memberships
+        ]
+
+        pending_invites = [
+            dashboard_member_item(item, request)
+            for item in pending_memberships
+        ]
+
+        return success_response(
+            message="Dashboard overview retrieved successfully",
+            data={
+                "active_plan": active_plan,
+                "family_members": family_members,
+                "next_reminder": dashboard_reminder_item(next_reminder),
+                "upcoming_reminders": upcoming_reminders,
+                "members": members,
+                "pending_invites": pending_invites,
+            },
+            status_code=status.HTTP_200_OK,
+        )
+
