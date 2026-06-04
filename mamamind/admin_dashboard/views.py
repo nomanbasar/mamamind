@@ -1,14 +1,17 @@
 from decimal import Decimal
 from datetime import timedelta
-
+from math import ceil
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from authentication.models import User
+from authentication.models import User, Family, FamilyMembership
 from subscriptions.models import UserSubscription, SubscriptionPlan
+
+from django.db.models import Q
+
 
 
 def success_response(message, data=None, status_code=status.HTTP_200_OK):
@@ -394,6 +397,275 @@ class AdminDashboardOverviewView(APIView):
                 },
                 "monthly_revenue_chart": build_monthly_revenue_chart(),
                 "subscribers_by_plan": build_subscribers_by_plan(),
+            },
+            status_code=status.HTTP_200_OK,
+        )
+    
+
+def admin_user_initials(full_name):
+    if not full_name:
+        return ""
+
+    parts = full_name.strip().split()
+
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+
+    return f"{parts[0][0]}{parts[-1][0]}".upper()
+
+
+def admin_user_last_active(user):
+    if not user.last_login:
+        return {
+            "value": None,
+            "display": "Never",
+        }
+
+    now = timezone.now()
+    diff = now - user.last_login
+
+    if diff.days == 0:
+        return {
+            "value": user.last_login,
+            "display": "Today",
+        }
+
+    if diff.days == 1:
+        return {
+            "value": user.last_login,
+            "display": "Yesterday",
+        }
+
+    return {
+        "value": user.last_login,
+        "display": f"{diff.days} days ago",
+    }
+
+
+def get_user_main_family(user):
+    membership = user.family_memberships.filter(
+        status=FamilyMembership.Status.ACTIVE
+    ).select_related(
+        "family",
+        "family__owner",
+    ).first()
+
+    if membership:
+        return membership.family, membership
+
+    pending_membership = user.family_memberships.filter(
+        status=FamilyMembership.Status.PENDING
+    ).select_related(
+        "family",
+        "family__owner",
+    ).first()
+
+    if pending_membership:
+        return pending_membership.family, pending_membership
+
+    owned_family = Family.objects.filter(owner=user).first()
+
+    if owned_family:
+        return owned_family, None
+
+    return None, None
+
+
+def get_family_active_subscription(family):
+    if not family:
+        return None
+
+    return UserSubscription.objects.filter(
+        user=family.owner,
+        status=UserSubscription.Status.ACTIVE,
+    ).select_related("plan").order_by("-id").first()
+
+
+def get_family_members_count(family):
+    if not family:
+        return 0
+
+    return family.memberships.filter(
+        status__in=[
+            FamilyMembership.Status.ACTIVE,
+            FamilyMembership.Status.PENDING,
+        ]
+    ).count()
+
+
+def admin_user_plan_data(subscription):
+    if not subscription or not subscription.plan:
+        return None
+
+    return {
+        "id": subscription.plan.id,
+        "name": subscription.plan.name,
+        "code": subscription.plan.code,
+        "price": str(subscription.plan.price),
+        "currency": subscription.plan.currency,
+        "billing_cycle": subscription.plan.billing_cycle,
+    }
+
+
+def admin_user_item(user, request=None):
+    family, membership = get_user_main_family(user)
+    subscription = get_family_active_subscription(family)
+
+    profile_image = None
+    profile_image_url = None
+
+    if getattr(user, "profile_image", None):
+        try:
+            profile_image = user.profile_image.url
+            profile_image_url = (
+                request.build_absolute_uri(user.profile_image.url)
+                if request
+                else user.profile_image.url
+            )
+        except Exception:
+            profile_image = None
+            profile_image_url = None
+
+    last_active = admin_user_last_active(user)
+
+    return {
+        "id": user.id,
+        "full_name": user.full_name,
+        "email": user.email,
+        "whatsapp_number": user.whatsapp_number,
+        "initials": admin_user_initials(user.full_name),
+        "role": user.role,
+        "status": "active" if user.is_active else "inactive",
+        "status_display": "Active" if user.is_active else "Inactive",
+        "is_email_verified": user.is_email_verified,
+        "is_active": user.is_active,
+        "join_date": user.date_joined.date() if user.date_joined else None,
+        "join_date_display": timezone.localtime(user.date_joined).strftime("%b %d, %Y") if user.date_joined else None,
+        "last_active": last_active["value"],
+        "last_active_display": last_active["display"],
+        "profile_image": profile_image,
+        "profile_image_url": profile_image_url,
+        "family": {
+            "id": family.id,
+            "name": family.name,
+            "owner_id": family.owner_id,
+        } if family else None,
+        "membership": {
+            "id": membership.id,
+            "relation": membership.relation,
+            "relation_display": membership.get_relation_display(),
+            "status": membership.status,
+            "status_display": membership.get_status_display(),
+        } if membership else None,
+        "plan": admin_user_plan_data(subscription),
+        "members_count": get_family_members_count(family),
+    }
+
+
+class AdminUserListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not is_admin_user(request.user):
+            return error_response(
+                message="Only admin can access this resource",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        search = request.query_params.get("search", "").strip()
+        plan = request.query_params.get("plan", "").strip()
+        user_status = request.query_params.get("status", "").strip()
+
+        try:
+            page = int(request.query_params.get("page", 1))
+        except ValueError:
+            page = 1
+
+        try:
+            page_size = int(request.query_params.get("page_size", 10))
+        except ValueError:
+            page_size = 10
+
+        if page < 1:
+            page = 1
+
+        if page_size < 1:
+            page_size = 10
+
+        if page_size > 100:
+            page_size = 100
+
+        users_qs = User.objects.exclude(
+            role=User.Role.ADMIN
+        ).order_by("-date_joined", "-id")
+
+        total_users = users_qs.count()
+
+        if search:
+            users_qs = users_qs.filter(
+                Q(full_name__icontains=search)
+                | Q(email__icontains=search)
+                | Q(whatsapp_number__icontains=search)
+            )
+
+        if user_status and user_status.lower() != "all":
+            if user_status.lower() == "active":
+                users_qs = users_qs.filter(is_active=True)
+            elif user_status.lower() == "inactive":
+                users_qs = users_qs.filter(is_active=False)
+
+        all_items = [
+            admin_user_item(user, request)
+            for user in users_qs
+        ]
+
+        if plan and plan.lower() != "all":
+            filtered_items = []
+
+            for item in all_items:
+                item_plan = item.get("plan")
+
+                if not item_plan:
+                    continue
+
+                if str(item_plan.get("id")) == plan or item_plan.get("code") == plan:
+                    filtered_items.append(item)
+
+            all_items = filtered_items
+
+        filtered_count = len(all_items)
+        total_pages = ceil(filtered_count / page_size) if filtered_count > 0 else 1
+
+        if page > total_pages:
+            page = total_pages
+
+        start_index = (page - 1) * page_size
+        end_index = start_index + page_size
+
+        results = all_items[start_index:end_index]
+
+        next_page = page + 1 if page < total_pages else None
+        previous_page = page - 1 if page > 1 else None
+
+        return success_response(
+            message="Admin users retrieved successfully",
+            data={
+                "summary": {
+                    "total_users": total_users,
+                    "filtered_count": filtered_count,
+                    "showing": len(results),
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                    "next_page": next_page,
+                    "previous_page": previous_page,
+                },
+                "filters": {
+                    "search": search,
+                    "plan": plan or "all",
+                    "status": user_status or "all",
+                },
+                "results": results,
             },
             status_code=status.HTTP_200_OK,
         )
