@@ -27,6 +27,6 @@ urlpatterns = [
     path("api/subscriptions/", include("subscriptions.urls")),
     path("api/reminders/", include("reminders.urls")),
     path("api/dashboard/", include("authentication.dashboard_urls")),
-    path("api/admin/dashboard/", include("admin_dashboard.urls")),
+    path("api/admin/", include("admin_dashboard.urls")),
 ]
 urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
