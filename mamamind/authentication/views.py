@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import User, OTP, Family, FamilyMembership
 from subscriptions.models import UserSubscription
-
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from .serializers import (
     RegisterSerializer,
     VerifyEmailOTPSerializer,
@@ -19,6 +19,7 @@ from .serializers import (
     ChangePasswordSerializer,
     InviteFamilyMemberSerializer,
     AcceptInviteSerializer,
+    UserProfileSerializer,
 )
 
 
@@ -616,6 +617,52 @@ class ChangePasswordView(APIView):
             },
         )
 
+
+class UserProfileView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get(self, request):
+        serializer = UserProfileSerializer(
+            request.user,
+            context={"request": request},
+        )
+
+        return success_response(
+            message="Profile retrieved successfully",
+            data={
+                "user": serializer.data,
+            },
+            status_code=status.HTTP_200_OK,
+        )
+
+    def patch(self, request):
+        serializer = UserProfileSerializer(
+            request.user,
+            data=request.data,
+            partial=True,
+            context={"request": request},
+        )
+
+        if not serializer.is_valid():
+            return error_response(
+                message="Validation error",
+                data=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer.save()
+
+        return success_response(
+            message="Profile updated successfully",
+            data={
+                "user": serializer.data,
+            },
+            status_code=status.HTTP_200_OK,
+        )
+    
+
+    
 
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
