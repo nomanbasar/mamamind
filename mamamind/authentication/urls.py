@@ -19,6 +19,7 @@ from .views import (
     ResendFamilyInviteView,
     CancelFamilyInviteView,
     UserProfileView,
+    CheckWhatsAppView
 )
 
 urlpatterns = [
@@ -47,4 +48,6 @@ urlpatterns = [
 
     path("family/invites/<int:membership_id>/resend/", ResendFamilyInviteView.as_view()),
     path("family/invites/<int:membership_id>/cancel/", CancelFamilyInviteView.as_view()),
+
+    path("check-whatsapp/", CheckWhatsAppView.as_view()),
 ]

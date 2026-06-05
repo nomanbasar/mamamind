@@ -391,27 +391,21 @@ class CheckWhatsAppSerializer(serializers.Serializer):
     def validate_whatsapp_number(self, value):
         """
         International WhatsApp number validation
-        Accepts formats like: +8801712345678, +1(234)567-8901, 01712345678 etc.
+        Supports any country code.
         """
         if not value:
             raise serializers.ValidationError("WhatsApp number is required.")
 
-        # Clean the number: remove spaces, dashes, parentheses
-        clean = ''.join(filter(str.isdigit, value)) 
+        # Keep only digits
+        clean = ''.join(filter(str.isdigit, value))
 
         if len(clean) < 8 or len(clean) > 15:
             raise serializers.ValidationError("Invalid WhatsApp number length.")
 
-        # Add + if missing and looks like international format
+        # Ensure it starts with +
         if not value.strip().startswith('+'):
-            # If user gave local number without country code, we keep as is
-            # But for storage we prefer E.164 format (+countrycode)
             formatted = "+" + clean
         else:
             formatted = "+" + clean
-
-        # Final validation
-        if not formatted.startswith('+'):
-            raise serializers.ValidationError("WhatsApp number must start with country code (e.g. +880...).")
 
         return formatted

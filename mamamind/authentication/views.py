@@ -23,6 +23,7 @@ from .serializers import (
     InviteFamilyMemberSerializer,
     AcceptInviteSerializer,
     UserProfileSerializer,
+    CheckWhatsAppSerializer
 )
 
 
@@ -91,6 +92,54 @@ def get_user_family_membership(user):
     return user.family_memberships.filter(
         status=FamilyMembership.Status.ACTIVE,
     ).select_related("family").first()
+
+
+def check_whatsapp_status(whatsapp_number, request=None):
+    """Return user info + tokens if user is ready to login"""
+    user = User.objects.filter(whatsapp_number=whatsapp_number).first()
+
+    if not user:
+        return {
+            "exists": False,
+            "in_family": False,
+            "message": "This WhatsApp number is available."
+        }
+
+    membership = user.family_memberships.select_related("family").first()
+
+    base_data = {
+        "exists": True,
+        "in_family": bool(membership),
+        "family_name": membership.family.name if membership else None,
+        "role": user.role,
+        "status": membership.status if membership else "no_membership",
+        "status_display": membership.get_status_display() if membership else None,
+    }
+
+    
+    can_login = (
+        user.has_usable_password() and 
+        user.is_active and 
+        user.is_email_verified
+    )
+
+    if can_login:
+        tokens = get_tokens_for_user(user)
+        base_data.update({
+            "requires_login": False,
+            "can_auto_login": True,
+            "tokens": tokens,                   
+            "message": f"User found in {membership.family.name if membership else 'system'}."
+        })
+    else:
+        base_data.update({
+            "requires_login": True,
+            "can_auto_login": False,
+            "tokens": None,
+            "message": "User exists but needs to complete setup or login manually."
+        })
+
+    return base_data
 
 
 def get_active_user_subscription(user):
@@ -685,6 +734,31 @@ class LogoutView(APIView):
         return success_response(
             message="Logout successful",
             data={},
+        )
+
+
+
+class CheckWhatsAppView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = CheckWhatsAppSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            return error_response(
+                message="Validation error",
+                data=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+
+        whatsapp_number = serializer.validated_data["whatsapp_number"]
+
+        status_data = check_whatsapp_status(whatsapp_number, request)
+
+        return success_response(
+            message="WhatsApp number checked successfully",
+            data=status_data,
+            status_code=status.HTTP_200_OK
         )
 
 
