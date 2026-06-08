@@ -108,6 +108,7 @@ def check_whatsapp_status(whatsapp_number, request=None):
     membership = user.family_memberships.select_related("family").first()
 
     base_data = {
+        "id": user.id,
         "exists": True,
         "in_family": bool(membership),
         "family_name": membership.family.name if membership else None,
